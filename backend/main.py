@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from connectors import GeminiConnector, GroqConnector
+from connectors import GeminiConnector, GroqConnector, OpenRouterConnector
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -18,6 +18,7 @@ async def lifespan(app: FastAPI):
     app.state.connectors = {
         "gemini": GeminiConnector(),
         "groq": GroqConnector(),
+        "openrouter": OpenRouterConnector(),
     }
     yield
 
