@@ -5,8 +5,10 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from dataclasses import asdict
 
 from connectors import GeminiConnector, GroqConnector, OpenRouterConnector
+from eval import run_benchmark
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +36,7 @@ class EvaluateRequest(BaseModel):
     prompt: str = Field(..., min_length = 1, description = "The prompt sent to every selected model.")
     providers: list[str] | None = Field(
         default = None,
-        description = "Provider names to call. If omitted, calls every registred provider."
+        description = "Provider names to call. If omitted, calls every regiestred provider."
     )
 
 class EvaluateResult(BaseModel):
@@ -50,6 +52,34 @@ class EvaluateResponse(BaseModel):
     total_latency_ms: float
     results: list[EvaluateResult]
 
+class LatencyStatsSchema(BaseModel):
+    n: int
+    mean_ms: float
+    median_ms: float
+    p95_ms: float
+    min_ms: float
+    max_ms: float
+    stddev_ms: float
+
+class BenchmarkResultSchema(BaseModel):
+    provider: str
+    model: str
+    latency: LatencyStatsSchema
+    successes: int
+    failures: int
+    sample_text: str
+    errors: list[str]
+
+class BenchmarkRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    providers: list[str] | None = Field(default=None)
+    n_runs: int = Field(default=5, ge=1, le=20, description="How many times to call each model.")
+
+class BenchmarkResponse(BaseModel):
+    prompt: str
+    n_runs: int
+    total_latency_ms: float
+    results: list[BenchmarkResultSchema]
 
 # Endpoints
 @app.get("/health")
@@ -110,4 +140,39 @@ async def evaluate(req: EvaluateRequest) -> EvaluateResponse:
         prompt = req.prompt,
         total_latency_ms = total_ms,
         results=results,
+    )
+
+@app.post("/benchmark", response_model=BenchmarkResponse)
+async def benchmark(req: BenchmarkRequest) -> BenchmarkResponse:
+    registry = app.state.connectors
+    chosen_names = req.providers or list(registry.keys())
+
+    unknown = [p for p in chosen_names if p not in registry]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown providers: {unknown}. Available: {list(registry.keys())}",
+        )
+    
+    chosen = [registry[name] for name in chosen_names]
+
+    start = time.perf_counter()
+    results = await run_benchmark(chosen, req.prompt, req.n_runs)
+    total_ms = (time.perf_counter() - start) * 1000
+
+    return BenchmarkResponse(
+        prompt=req.prompt,
+        n_runs=req.n_runs,
+        total_latency_ms=total_ms,
+        results=[
+            BenchmarkResultSchema(
+                provider=r.provider,
+                model=r.model,
+                latency=LatencyStatsSchema(**asdict(r.latency)),
+                successes=r.successes,
+                failures=r.failures,
+                sample_text=r.sample_text,
+                errors=r.errors,
+            ) for r in results
+        ],
     )
