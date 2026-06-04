@@ -6,9 +6,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dataclasses import asdict
+from fastapi.middleware.cors import CORSMiddleware
 
 from connectors import GeminiConnector, GroqConnector, OpenRouterConnector
 from eval import run_benchmark
+
+from judges import OllamaJudge
+from eval.judge_runner import judge_all
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +26,8 @@ async def lifespan(app: FastAPI):
         "groq": GroqConnector(),
         "openrouter": OpenRouterConnector(),
     }
+
+    app.state.judge = OllamaJudge()
     yield
 
 app = FastAPI(
@@ -29,6 +35,17 @@ app = FastAPI(
     description="AI model evaluation platform — Layer 1 connectors exposed via HTTP.",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Pydantic Schemas
@@ -80,6 +97,37 @@ class BenchmarkResponse(BaseModel):
     n_runs: int
     total_latency_ms: float
     results: list[BenchmarkResultSchema]
+
+class JudgeRequest(BaseModel):
+    prompt: str = Field(..., min_length = 1)
+    providers: list[str] | None = Field(
+        default = None,
+        description = "Provider names to evaluate then judge. If omitted, calls every provider."
+    )
+
+class JudgeScoresSchema(BaseModel):
+    accuracy: int
+    helpfulness: int
+    clarity: int
+    conciseness: int
+    overall: int
+
+class JudgeRow(BaseModel):
+    provider: str
+    model: str
+    text: str
+    response_latency_ms: float
+    scores: JudgeScoresSchema | None
+    reasoning: str
+    judge_model: str
+    judge_latency_ms: float
+    error: str | None = None
+
+class JudgeResponse(BaseModel):
+    prompt: str
+    judge_model: str
+    total_latency_ms: float
+    results: list[JudgeRow]
 
 # Endpoints
 @app.get("/health")
@@ -175,4 +223,63 @@ async def benchmark(req: BenchmarkRequest) -> BenchmarkResponse:
                 errors=r.errors,
             ) for r in results
         ],
+    )
+
+@app.post("/judge", response_model = JudgeResponse)
+async def judge(req: JudgeRequest) -> JudgeResponse:
+    registry: dict = app.state.connectors
+    judge_obj = app.state.judge
+
+    chosen_names = req.providers or list(registry.keys())
+    unknown = [p for p in chosen_names if p not in registry]
+    if unknown:
+        raise HTTPException(
+            status_code = 400,
+            detail=f"Unknown providers: {unknown}. Available: {list(registry.keys())}",
+        )
+    
+    chosen = [registry[name] for name in chosen_names]
+
+    start = time.perf_counter()
+
+    # 1) fan out to providers (same as /evaluate)
+    raw = await asyncio.gather(
+        *(c.generate(req.prompt) for c in chosen),
+        return_exceptions=True,
+    )
+    # filter to clean ConnectorResponses for the judge to see
+    responses = [r for r in raw if not isinstance(r, Exception) and not r.error]
+
+    # 2) judge the surviving responses
+    verdicts = await judge_all(judge_obj, req.prompt, responses)
+
+    total_ms = (time.perf_counter() - start) * 1000
+
+    # Pair verdicts back with their source responses (same order — gather preserves it,
+    # and judge_all preserves the order of the filtered list).
+    results: list[JudgeRow] = []
+    for resp, v in zip(responses, verdicts):
+        results.append(JudgeRow(
+            provider=v.provider,
+            model=v.model,
+            text=resp.text,
+            response_latency_ms=resp.latency_ms,
+            scores=None if v.error else JudgeScoresSchema(
+                accuracy=v.scores.accuracy,
+                helpfulness=v.scores.helpfulness,
+                clarity=v.scores.clarity,
+                conciseness=v.scores.conciseness,
+                overall=v.scores.overall,
+            ),
+            reasoning=v.reasoning,
+            judge_model=v.judge_model,
+            judge_latency_ms=v.latency_ms,
+            error=v.error,
+        ))
+
+    return JudgeResponse(
+        prompt=req.prompt,
+        judge_model=judge_obj.judge_model,
+        total_latency_ms=total_ms,
+        results=results,
     )
