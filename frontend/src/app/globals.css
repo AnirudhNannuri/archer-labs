@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+:root {
+  --background: #050314;
+  --foreground: #ededf3;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+@keyframes cosmos-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes cosmos-spin-reverse {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.animate-cosmos-spin {
+  animation: cosmos-spin 180s linear infinite;
+}
+
+.animate-cosmos-spin-reverse {
+  animation: cosmos-spin-reverse 180s linear infinite;
+}
